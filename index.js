@@ -6,10 +6,14 @@ const axios = require('axios');
 // Define file paths
 const pdfFolder = path.join(__dirname, 'pdf_files/');
 const processedFolder = path.join(__dirname, 'processed/');
+const failedFolder = path.join(__dirname, 'failed uploads for sent/');
 
-// Create the 'processed' folder if it doesn't exist
+// Create folders if they don't exist
 if (!fs.existsSync(processedFolder)) {
     fs.mkdirSync(processedFolder);
+}
+if (!fs.existsSync(failedFolder)) {
+    fs.mkdirSync(failedFolder);
 }
 
 // Extract text from PDF
@@ -34,71 +38,51 @@ function formatPhoneNumber(phone) {
 
 // Parse extracted PDF text
 function parsePdfText(text) {
-    // Normalize spaces
     const normalizedText = text.replace(/\s+/g, ' ');
-
-    // Initialize record object with default values
     const record = {
-        type: 'Received',
-        from: null,
-        to: '(207) 261 - 0798',
+        type: 'Sent',
+        to: '(207) 261 - 0798', // 'to' is now fixed
+        from: null, // 'from' is dynamic
         subject: 'PRIOR AUTHORIZATION PRESCRIPTION REQUEST',
-        sender: null,
+        sender: 'RIGHT CHOICE MEDICAL SUPPLY', // Set sender to fixed value
         createdAt: null
     };
 
-    console.log('--- Extracting fields from PDF text ---');
-
-    // Enhanced 'createdAt' extraction with more flexible regex
-    const createdAtMatch = normalizedText.match(/(\d{1,2}\/\d{1,2}\/\d{4} \d{1,2}:\d{2} [P]M)/);
+    // Match 'createdAt' with regex and adjust the date
+    const createdAtMatch = normalizedText.match(/(\d{1,2}\/\d{1,2}\/\d{4} \d{1,2}:\d{2} [AP]M)/);
     if (createdAtMatch) {
-        // Convert 'createdAt' to 'YYYY-MM-DD HH:MM:SS' format
-        const dateStr = createdAtMatch[1];
-        const dateObj = new Date(dateStr);
-        if (!isNaN(dateObj)) {
-            // Format the date to 'YYYY-MM-DD HH:MM:SS'
-            const yyyy = dateObj.getFullYear();
-            const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
-            const dd = String(dateObj.getDate()).padStart(2, '0');
-            const hh = String(dateObj.getHours()).padStart(2, '0');
-            const min = String(dateObj.getMinutes()).padStart(2, '0');
-            const ss = String(dateObj.getSeconds()).padStart(2, '0');
-            record.createdAt = `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
-        }
+        const [month, day, year, hour, minute, period] = createdAtMatch[1].match(/(\d{1,2})\/(\d{1,2})\/(\d{4}) (\d{1,2}):(\d{2}) ([AP]M)/).slice(1);
+
+        // Convert to 24-hour format
+        let adjustedHour = parseInt(hour);
+        if (period === 'PM' && adjustedHour !== 12) adjustedHour += 12;
+        if (period === 'AM' && adjustedHour === 12) adjustedHour = 0;
+
+        // Create a date object and subtract one day
+        const dateObj = new Date(year, month - 1, day, adjustedHour, minute);
+        dateObj.setDate(dateObj.getDate() - 1);
+
+        // Format the date to 'YYYY-MM-DD HH:MM:SS'
+        const yyyy = dateObj.getFullYear();
+        const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+        const dd = String(dateObj.getDate()).padStart(2, '0');
+        const hh = String(dateObj.getHours()).padStart(2, '0');
+        const min = String(dateObj.getMinutes()).padStart(2, '0');
+        const ss = String(dateObj.getSeconds()).padStart(2, '0');
+        record.createdAt = `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
     }
-    console.log('Extracted createdAt:', record.createdAt);
 
     // Match 'from' (Fax number)
     const fromMatch = normalizedText.match(/Fax:\s*([0-9-]+)/i);
     if (fromMatch) {
-        const cleanedFrom = fromMatch[1].replace(/\D/g, ''); // Remove non-digit characters
-        record.from = formatPhoneNumber(cleanedFrom); // Format the phone number
-    }
-    console.log('Extracted from:', record.from);
-
-    // Enhanced regex for 'PHYSICIAN NAME' detection
-    const senderMatch = normalizedText.match(
-        /PHYSICIAN INFORMATION\s*([A-Z\s,\.]+(?:MD|M\.D\.|DO|D\.O\.|APN|N\.P\.|M\.D|D\.O|APRN|M\.D|APRN\.))/i
-    );
-
-    if (senderMatch) {
-        record.sender = senderMatch[1].trim();
-    } else {
-        // Fallback: Match directly after 'PHYSICIAN NAME' label
-        const fallbackMatch = normalizedText.match(/PHYSICIAN NAME\s*[:\-]?\s*([A-Z\s,\.]+)/i);
-        if (fallbackMatch) {
-            record.sender = fallbackMatch[1].trim();
-        }
+        const cleanedFrom = fromMatch[1].replace(/\D/g, '');
+        record.from = formatPhoneNumber(cleanedFrom); // Set 'from' field
     }
 
-    console.log('Matched PHYSICIAN NAME:', record.sender);
-
-    // Check if all required fields are present
     if (record.createdAt && record.from && record.sender) {
-        console.log('--- All fields successfully extracted ---');
         return record;
     } else {
-        console.log('Required fields missing in the PDF.');
+        console.error('Record missing required fields:', record);
         return null;
     }
 }
@@ -106,12 +90,12 @@ function parsePdfText(text) {
 // Prepare records for bulk upload
 async function prepareRecordsForUpload(pdfFiles) {
     const records = [];
+    const failedFiles = [];
 
     for (const file of pdfFiles) {
         const filePath = path.join(pdfFolder, file);
-        console.log(`\n--- Processing file: ${file} ---`);
-
         const pdfText = await extractPdfText(filePath);
+
         if (pdfText) {
             const record = parsePdfText(pdfText);
             if (record) {
@@ -119,17 +103,31 @@ async function prepareRecordsForUpload(pdfFiles) {
                 record.file_extension = 'pdf';
                 records.push(record);
 
-                // Close the file and move it to 'processed' folder
+                // Move file to 'processed' folder
                 try {
                     const processedPath = path.join(processedFolder, file);
                     fs.renameSync(filePath, processedPath);
-                    console.log(`Moved file to processed folder: ${file}`);
                 } catch (error) {
                     console.error(`Error moving file: ${error.message}`);
                 }
+            } else {
+                // Move to 'failed uploads for sent' folder if record creation fails
+                failedFiles.push(file);
             }
         } else {
-            console.log(`Failed to extract text from ${file}`);
+            // Move to 'failed uploads for sent' folder if text extraction fails
+            failedFiles.push(file);
+        }
+    }
+
+    // Move failed files to the 'failed uploads for sent' folder
+    for (const file of failedFiles) {
+        try {
+            const failedPath = path.join(failedFolder, file);
+            fs.renameSync(path.join(pdfFolder, file), failedPath);
+            console.log(`Moved file to failed uploads folder: ${file}`);
+        } catch (error) {
+            console.error(`Error moving failed file: ${error.message}`);
         }
     }
 
@@ -142,20 +140,37 @@ function fileToBase64(filePath) {
     return Buffer.from(fileContent).toString('base64');
 }
 
-// Bulk upload function
-async function bulkUpload(records) {
-    try {
-        const response = await axios.post('https://humble-fax.com/upload_bulk', {
-            records: records
-        }, {
-            headers: { 'Content-Type': 'application/json' }
-        });
+// Batch the upload requests
+async function batchUpload(records, batchSize = 100) {
+    for (let i = 0; i < records.length; i += batchSize) {
+        const batch = records.slice(i, i + batchSize);
 
-        // Debug log to ensure payload sent correctly
-        console.log('Payload sent:', JSON.stringify(records, null, 2));
-        console.log('Response:', response.data);
+        try {
+            console.log(`Uploading batch ${i / batchSize + 1} of ${Math.ceil(records.length / batchSize)}...`);
+            const response = await axios.post('http://localhost/humblefax/upload_bulk', {
+                records: batch
+            }, {
+                headers: { 'Content-Type': 'application/json' }
+            });
+            console.log(`Batch ${i / batchSize + 1} uploaded successfully. Response:`, response.data);
+        } catch (error) {
+            if (error.response) {
+                console.error('Error response:', error.response.data);
+            } else {
+                console.error('Error uploading batch:', error.message);
+            }
+        }
+    }
+}
+
+// Count the processed PDF files in the 'processed' folder
+function countProcessedPDFs() {
+    try {
+        const processedFiles = fs.readdirSync(processedFolder);
+        const pdfCount = processedFiles.filter(file => file.toLowerCase().endsWith('.pdf')).length;
+        console.log(`Total processed PDF files: ${pdfCount}`);
     } catch (error) {
-        console.error('Error uploading records:', error.response ? error.response.data : error.message);
+        console.error('Error counting processed PDFs:', error.message);
     }
 }
 
@@ -167,10 +182,13 @@ async function bulkUpload(records) {
 
         if (recordsForUpload.length > 0) {
             console.log(`Preparing to upload ${recordsForUpload.length} records...`);
-            await bulkUpload(recordsForUpload);
+            await batchUpload(recordsForUpload, 100); // Upload in batches of 100
         } else {
             console.log('No valid records found for upload.');
         }
+
+        // Count the processed PDF files after processing
+        countProcessedPDFs();
     } catch (error) {
         console.error('Error processing PDFs:', error.message);
     }
