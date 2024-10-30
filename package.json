@@ -5,7 +5,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
-    "run-received": "node received.js" 
+    "run-received": "node received.js",
+    "sent": "node sent.js"
   },
   "keywords": [],
   "author": "",
@@ -16,3 +17,8 @@
     "pdf-parse": "^1.1.1"
   }
 }
+
+
+
+
+

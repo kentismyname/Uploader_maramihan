@@ -11,19 +11,23 @@ const failedFolder = path.join(__dirname, 'failed uploads for received/');
 // Create necessary folders if they don't exist
 if (!fs.existsSync(processedFolder)) {
     fs.mkdirSync(processedFolder);
+    console.log(`Created processed folder: ${processedFolder}`);
 }
 if (!fs.existsSync(failedFolder)) {
     fs.mkdirSync(failedFolder);
+    console.log(`Created failed uploads folder: ${failedFolder}`);
 }
 
 // Extract text from PDF
 async function extractPdfText(filePath) {
     try {
+        console.log(`Reading PDF file: ${filePath}`);
         const dataBuffer = fs.readFileSync(filePath);
         const data = await pdfParse(dataBuffer);
+        console.log(`Successfully extracted text from: ${filePath}`);
         return data.text;
     } catch (error) {
-        console.error('Error parsing PDF:', error);
+        console.error(`Error parsing PDF (${filePath}):`, error);
         return null;
     }
 }
@@ -44,8 +48,8 @@ function parsePdfText(text) {
     // Initialize record object with default values
     const record = {
         type: 'Received',
-        from: '(207) 261 - 0798', // Fixed 'from' value
-        to: null, // 'to' is now dynamic
+        from: '(207) 261 - 0798',
+        to: null,
         subject: 'PRIOR AUTHORIZATION PRESCRIPTION REQUEST',
         sender: null,
         createdAt: null
@@ -53,19 +57,17 @@ function parsePdfText(text) {
 
     console.log('--- Extracting fields from PDF text ---');
 
-    // Extract 'createdAt' with regex and keep the original date
+    // Extract 'createdAt' with improved regex pattern
     const createdAtMatch = normalizedText.match(/(\d{1,2}\/\d{1,2}\/\d{4} \d{1,2}:\d{2} [AP]M)/);
     if (createdAtMatch) {
         const [month, day, year, hour, minute, period] = createdAtMatch[1]
             .match(/(\d{1,2})\/(\d{1,2})\/(\d{4}) (\d{1,2}):(\d{2}) ([AP]M)/)
             .slice(1);
 
-        // Convert to 24-hour format
         let adjustedHour = parseInt(hour);
         if (period === 'PM' && adjustedHour !== 12) adjustedHour += 12;
         if (period === 'AM' && adjustedHour === 12) adjustedHour = 0;
 
-        // Format the date to 'YYYY-MM-DD HH:MM:SS'
         const yyyy = year;
         const mm = String(month).padStart(2, '0');
         const dd = String(day).padStart(2, '0');
@@ -73,40 +75,42 @@ function parsePdfText(text) {
         const min = String(minute).padStart(2, '0');
         const ss = '00';
         record.createdAt = `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+        console.log('Extracted createdAt:', record.createdAt);
+    } else {
+        console.log('No "createdAt" found in the text.');
     }
-    console.log('Extracted createdAt:', record.createdAt);
 
-    // Enhanced extraction for 'to' (Fax number)
+    // Extract 'to' (Fax number) using improved pattern
     const toMatch = normalizedText.match(/(?:Fax:|To:|FAX:|TO:)\s*([0-9\s\-]+)/i);
     if (toMatch) {
-        const cleanedTo = toMatch[1].replace(/\D/g, ''); // Remove non-digit characters
+        const cleanedTo = toMatch[1].replace(/\D/g, '');
         if (cleanedTo.length === 10) {
-            record.to = formatPhoneNumber(cleanedTo); // Format the phone number
+            record.to = formatPhoneNumber(cleanedTo);
+            console.log('Extracted to:', record.to);
+        } else {
+            console.log('Invalid "to" (Fax) format:', cleanedTo);
         }
+    } else {
+        console.log('No "to" (Fax) found in the text.');
     }
-    console.log('Extracted to:', record.to);
 
-    // Enhanced regex for 'PHYSICIAN NAME' detection
+    // Extract 'sender' with fallback options
     const senderMatch = normalizedText.match(
-        /PHYSICIAN INFORMATION\s*([A-Z\s,\.]+(?:MD|M\.D\.|DO|D\.O\.|APN|N\.P\.|M\.D|D\.O|APRN|M\.D|APRN\.))/i
+        /PHYSICIAN NAME\s*[:\-]?\s*([A-Z\s,\.]+)/i
     );
     if (senderMatch) {
         record.sender = senderMatch[1].trim();
+        console.log('Matched PHYSICIAN NAME:', record.sender);
     } else {
-        // Fallback: Match directly after 'PHYSICIAN NAME' label
-        const fallbackMatch = normalizedText.match(/PHYSICIAN NAME\s*[:\-]?\s*([A-Z\s,\.]+)/i);
-        if (fallbackMatch) {
-            record.sender = fallbackMatch[1].trim();
-        }
+        console.log('No "PHYSICIAN NAME" found in the text.');
     }
-    console.log('Matched PHYSICIAN NAME:', record.sender);
 
     // Check if all required fields are present
     if (record.createdAt && record.to && record.sender) {
         console.log('--- All fields successfully extracted ---');
         return record;
     } else {
-        console.log('Required fields missing in the PDF.', record);
+        console.error('Incomplete record:', record);
         return null;
     }
 }
@@ -114,6 +118,7 @@ function parsePdfText(text) {
 // Prepare records for bulk upload
 async function prepareRecordsForUpload(pdfFiles) {
     const records = [];
+    const failedFiles = [];
 
     for (const file of pdfFiles) {
         const filePath = path.join(pdfFolder, file);
@@ -135,28 +140,28 @@ async function prepareRecordsForUpload(pdfFiles) {
                 } catch (error) {
                     console.error(`Error moving file: ${error.message}`);
                 }
+            } else {
+                console.log(`Failed to create record for file: ${file}`);
+                failedFiles.push(file);
             }
         } else {
-            console.log(`Failed to extract text from ${file}`);
+            console.log(`Failed to extract text from file: ${file}`);
+            failedFiles.push(file);
         }
     }
 
-    return records;
-}
-
-// Move remaining PDF files to 'failed uploads for received' folder
-function moveFailedFiles() {
-    const remainingFiles = fs.readdirSync(pdfFolder).filter(file => file.endsWith('.pdf'));
-
-    for (const file of remainingFiles) {
+    // Move failed files to the 'failed uploads for received' folder
+    for (const file of failedFiles) {
         try {
             const failedPath = path.join(failedFolder, file);
             fs.renameSync(path.join(pdfFolder, file), failedPath);
             console.log(`Moved file to failed uploads folder: ${file}`);
         } catch (error) {
-            console.error(`Error moving file to failed folder: ${error.message}`);
+            console.error(`Error moving failed file: ${error.message}`);
         }
     }
+
+    return records;
 }
 
 // Convert file to base64
@@ -165,20 +170,22 @@ function fileToBase64(filePath) {
     return Buffer.from(fileContent).toString('base64');
 }
 
-// Bulk upload function
-async function bulkUpload(records) {
-    try {
-        const response = await axios.post('http://localhost/humblefax/upload_bulk', {
-            records: records
-        }, {
-            headers: { 'Content-Type': 'application/json' }
-        });
+// Batch upload function
+async function batchUpload(records, batchSize = 100) {
+    for (let i = 0; i < records.length; i += batchSize) {
+        const batch = records.slice(i, i + batchSize);
+        console.log(`Preparing to upload batch ${i / batchSize + 1} of ${Math.ceil(records.length / batchSize)}...`);
 
-        // Debug log to ensure payload sent correctly
-        console.log('Payload sent:', JSON.stringify(records, null, 2));
-        console.log('Response:', response.data);
-    } catch (error) {
-        console.error('Error uploading records:', error.response ? error.response.data : error.message);
+        try {
+            const response = await axios.post('http://localhost/humblefax/upload_bulk', {
+                records: batch
+            }, {
+                headers: { 'Content-Type': 'application/json' }
+            });
+            console.log(`Batch ${i / batchSize + 1} uploaded successfully. Response:`, response.data);
+        } catch (error) {
+            console.error('Error uploading batch:', error.response ? error.response.data : error.message);
+        }
     }
 }
 
@@ -186,11 +193,13 @@ async function bulkUpload(records) {
 (async function main() {
     try {
         const pdfFiles = fs.readdirSync(pdfFolder).filter(file => file.endsWith('.pdf'));
+        console.log(`Found ${pdfFiles.length} PDF files for processing.`);
+
         const recordsForUpload = await prepareRecordsForUpload(pdfFiles);
+        console.log(`Total records prepared for upload: ${recordsForUpload.length}`);
 
         if (recordsForUpload.length > 0) {
-            console.log(`Preparing to upload ${recordsForUpload.length} records...`);
-            await bulkUpload(recordsForUpload);
+            await batchUpload(recordsForUpload, 100); // Upload in batches of 100
         } else {
             console.log('No valid records found for upload.');
         }
